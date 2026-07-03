@@ -14,6 +14,6 @@ defineProps({
       <span>{{ value ?? '--' }}</span>
       <small v-if="unit">{{ unit }}</small>
     </div>
-    <div class="metric-hint">{{ hint || '实时监测' }}</div>
+    <div v-if="hint" class="metric-hint">{{ hint }}</div>
   </div>
 </template>

@@ -1,96 +1,58 @@
 # 荆襄气象监测看板优化版
 
-当前版本：v1.4.0。
+当前版本：v1.7.7。
+
+## v1.7.7 缓存管理页面
+
+缓存控制已从主看板拆分到独立页面，主看板不会显示缓存重建、云端刷新、缓存进度等控制项。需要管理服务器 SQLite 缓存时，直接访问：
+
+```text
+http://localhost:5173/cache-admin
+```
+
+服务器部署后访问：
+
+```text
+https://jinxiang.eatrice.cn/cache-admin
+```
+
+该页面可以查看最近区间的逐日缓存状态、记录数、首末记录时间、活跃小时分布，并支持按日重新拉取、按日删除、查看具体小时记录和删除单条缓存记录。该页面没有从主看板入口，避免现场展示时误操作。
+
 
 ## 本版关键调整
 
-1. 页面打开后立即请求云端上游数据，不再返回或展示本地模拟数据。
-2. 云端数据加载失败时，前端弹窗提示失败原因，并自动重试，最多 3 次。
-3. 前端接口路径恢复为原仓库拼写：`/api/borad/{page}/{page_size}`，用于对齐现有 Nginx 配置。
-4. 健康检查接口新增兼容路径：`/api/borad/health`，可以被你当前的 `location /api/borad/` 直接转发。
-5. 服务端部署口径统一：公网只开放 HTTPS 443；Flask 后端只监听服务器内网端口 52000；5173 只用于本地开发调试。
-6. 上游请求超时时间默认 30 秒。
-7. 移动端图表继续保留 v1.3.1 的紧凑布局优化。
+1. 启动脚本在启动 Flask 和前端前，会先运行 `backend/cache_checker.py`。
+2. 缓存检查器会按自然日分块拉取最近 30 天数据，并写入服务器 SQLite 数据库。
+3. 缓存未达到最低记录数时，默认直接阻止后端启动，避免页面打开后只有空表格。
+4. 第三方接口仍按原仓库方式请求：`/getDeviceData/{page}/{page_size}`、`Authorization + timestamp`、`search[start_time]` 和 `search[end_time]`。
+5. 长时间范围不再一次性请求第三方接口，而是拆成每天一个请求窗口；这可以规避第三方接口对两周、一个月等大范围查询返回空页的问题。
+6. 前端趋势图继续按日期选择器区间显示，数据点按小时聚合均值。
+7. 缓存统一放在服务器 SQLite 数据库，不使用浏览器 localStorage，不使用 mock 数据。
 
-## 端口使用原则
-
-生产环境不需要把 Nginx 转发到 5173。5173 是 Vite 本地开发服务器端口，只适用于本地调试。
-
-服务器部署时推荐如下结构：
+## 启动流程
 
 ```text
-用户浏览器 https://jinxiang.eatrice.cn:443
-        ↓
-Nginx 静态文件 root /opt/borad-vue3/dist
-        ↓
-/api/borad/ 反向代理到 http://127.0.0.1:52000/api/borad/
-        ↓
-Flask 后端 52000
-        ↓
-weather-api.jsjldzkj.com 云端接口
+start-windows.bat / start-linux.sh
+  ↓
+安装依赖
+  ↓
+运行 backend/cache_checker.py
+  ↓
+按天拉取最近 30 天数据并写入 runtime_cache/weather_cache.sqlite3
+  ↓
+缓存记录数达到要求后启动 Flask 52000
+  ↓
+启动 Vite 5173 或由 Nginx 443 访问生产 dist
 ```
 
-## 与你当前 Nginx 配置的对齐方式
+如果缓存检查失败，后端不会启动。此时应先检查 `.env` 中的密钥、第三方接口时间格式、网络连通性和控制台日志。
 
-你当前的配置可以继续使用。新版前端只调用：
-
-```text
-/api/borad/1/20
-/api/borad/health
-```
-
-这两个路径都会命中：
-
-```nginx
-location /api/borad/ {
-    proxy_pass http://127.0.0.1:52000/api/borad/;
-}
-```
-
-包内也提供了参考配置：
-
-```text
-deploy/nginx-jinxiang.conf
-```
-
-其中加入了 30 秒代理超时：
-
-```nginx
-proxy_connect_timeout 30s;
-proxy_send_timeout 30s;
-proxy_read_timeout 30s;
-```
-
-## 本地开发启动
-
-Linux：
-
-```bash
-chmod +x start-linux.sh
-./start-linux.sh
-```
-
-Windows：
-
-```bat
-start-windows.bat
-```
-
-本地开发时浏览器会打开：
-
-```text
-http://localhost:5173/
-```
-
-Vite 会把 `/api` 代理到本机 Flask 后端 `http://127.0.0.1:52000`。
-
-## 服务器部署步骤
-
-1. 配置环境变量。推荐复制 `.env.example` 为 `.env`，并填写真实密钥。
+## 推荐 `.env`
 
 ```env
 VITE_API_BASE_URL=/api
 VITE_API_TIMEOUT=30000
+VITE_OPEN_BROWSER=true
 
 BACKEND_HOST=0.0.0.0
 BACKEND_PORT=52000
@@ -99,55 +61,154 @@ CORS_ALLOW_ORIGIN=*
 
 WEATHER_API_BASE_URL=http://weather-api.jsjldzkj.com/api
 WEATHER_APP_ID=dashboard
-WEATHER_SECRET_KEY=<你的真实密钥>
+WEATHER_SECRET_KEY=你的真实密钥
 WEATHER_TIMEOUT_SECONDS=30
+WEATHER_HMAC_MODE=json
+WEATHER_UPSTREAM_TIME_FORMAT=auto
+
 WEATHER_ALLOW_MOCK=false
 WEATHER_FORCE_MOCK=false
-WEATHER_HMAC_MODE=json
+
+WEATHER_CACHE_ENABLED=true
+WEATHER_CACHE_BACKEND=sqlite
+WEATHER_CACHE_DB=runtime_cache/weather_cache.sqlite3
+WEATHER_CACHE_TABLE=weather_cache_v174
+WEATHER_CACHE_MAX_AGE_SECONDS=0
+
+WEATHER_UPSTREAM_PAGE_SIZE=500
+WEATHER_UPSTREAM_MAX_PAGES=160
+WEATHER_UPSTREAM_MAX_RECORDS=300000
+WEATHER_UPSTREAM_TRUST_TOTAL_HINT=false
+
+WEATHER_PREFETCH_SPLIT_DAYS=true
+WEATHER_PREFETCH_CHUNK_DAYS=1
+WEATHER_PRESTART_CACHE_CHECK_ENABLED=true
+WEATHER_PRESTART_CACHE_CHECK_DAYS=30
+WEATHER_PRESTART_CACHE_CHECK_FORCE=false
+WEATHER_PRESTART_CACHE_STRICT=true
+WEATHER_PRESTART_CACHE_MIN_RECORDS=1
+
+WEATHER_STARTUP_PREFETCH_ENABLED=false
+WEATHER_STARTUP_PREFETCH_DAYS=30
+WEATHER_STARTUP_PREFETCH_FORCE=false
 ```
 
-2. 构建前端。
+其中 `WEATHER_CACHE_TABLE=weather_cache_v174` 会使用新的 SQLite 表，避免旧版本生成的错误覆盖缓存继续生效。
+
+## 本地启动
+
+Windows：
+
+```bat
+start-windows.bat
+```
+
+Linux：
 
 ```bash
-chmod +x build-frontend-linux.sh
+chmod +x start-linux.sh
+./start-linux.sh
+```
+
+## 单独检查缓存
+
+```bash
+cd /opt/atmosphere-borad/atmosphere-borad-optimized
+source .venv/bin/activate
+python backend/cache_checker.py --days 30 --force
+```
+
+如果希望只检查最近 14 天：
+
+```bash
+python backend/cache_checker.py --days 14 --force
+```
+
+## 服务器部署
+
+生产环境仍建议：公网只开放 443，Nginx 服务前端 dist，并把 `/api/borad/` 反向代理到 Flask 52000。
+
+```nginx
+location /api/borad/ {
+    proxy_pass http://127.0.0.1:52000/api/borad/;
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 30s;
+    proxy_read_timeout 30s;
+}
+```
+
+更新部署：
+
+```bash
+cd /opt/atmosphere-borad/atmosphere-borad-optimized
+unzip -o /path/to/atmosphere-borad-optimized-v1.7.4.zip -d /opt/atmosphere-borad
 ./build-frontend-linux.sh
+sudo systemctl daemon-reload
+sudo systemctl restart atmosphere-borad
+sudo systemctl reload nginx
 ```
 
-3. 把 `dist` 部署到 Nginx root。
+systemd 推荐在 `ExecStartPre` 中加入缓存检查：
+
+```ini
+ExecStartPre=/opt/atmosphere-borad/atmosphere-borad-optimized/.venv/bin/python /opt/atmosphere-borad/atmosphere-borad-optimized/backend/cache_checker.py
+ExecStart=/opt/atmosphere-borad/atmosphere-borad-optimized/.venv/bin/python app.py
+```
+
+## 常见问题
+
+如果缓存检查器显示 `records=0`，重点排查：
+
+```text
+1. WEATHER_SECRET_KEY 是否填写真实值。
+2. WEATHER_HMAC_MODE 是否应为 json。
+3. WEATHER_UPSTREAM_TIME_FORMAT 是否应固定为 ms。
+4. 第三方接口在最近 30 天内是否确实有设备数据。
+5. 当前网络是否能访问 weather-api.jsjldzkj.com。
+```
+
+如果旧缓存影响结果，可以删除数据库或更换表名：
 
 ```bash
-sudo mkdir -p /opt/borad-vue3
-sudo rm -rf /opt/borad-vue3/dist
-sudo cp -r dist /opt/borad-vue3/dist
+rm -f runtime_cache/weather_cache.sqlite3
 ```
 
-4. 启动后端。
+或在 `.env` 中设置新表名：
+
+```env
+WEATHER_CACHE_TABLE=weather_cache_v174
+```
+
+## v1.7.7 本地调试注意事项
+
+如果页面控制台出现 `/api/borad/cache/progress 404`，同时 `/api/borad/1/5000` 返回 `Upstream request timed out after 10.0s`，通常说明 52000 端口上仍然运行着旧版 Flask 后端。此时前端虽然是新版本，但 Vite 代理命中了旧后端，因此会出现“缓存已经完成但页面仍然去请求第三方接口”的现象。
+
+v1.7.7 的启动脚本会自动清理 `BACKEND_PORT` 上的旧监听进程，再启动新后端，并通过 `/api/borad/health` 校验 `version=1.7.7`。如不希望脚本自动结束旧进程，可设置：
 
 ```bash
-chmod +x start-backend-linux.sh
-./start-backend-linux.sh
+SKIP_KILL_BACKEND_PORT=true
 ```
 
-生产环境建议用 systemd 或 supervisor 托管后端进程。
+Windows 本地测试建议直接关闭旧的 `atmosphere-backend` 命令行窗口后重新双击 `start-windows.bat`。启动后检查：
 
-5. 验证健康检查。
-
-```bash
-curl https://jinxiang.eatrice.cn/api/borad/health
+```text
+http://127.0.0.1:52000/api/borad/health
 ```
 
-需要看到：
+返回中应包含：
 
 ```json
-"has_secret_key": true
+"version": "1.7.7"
 ```
 
-6. 验证数据接口。
+## v1.7.7 启动前缓存扫描
 
-```bash
-curl "https://jinxiang.eatrice.cn/api/borad/1/20?start_time=1717200000000&end_time=1717286400000"
+系统启动前会先运行 `backend/cache_checker.py`。缓存完成后，检查器会继续扫描服务器 SQLite 数据库，并在后端控制台打印逐日结果：日期、覆盖状态、记录数、首末记录时间和活跃小时。该信息只打印到控制台，不在前端显示，用于判断图表中的空白日期是缓存缺失还是第三方接口当天确实没有数据。
+
+推荐配置：
+
+```env
+WEATHER_PRESTART_CACHE_SCAN_ENABLED=true
 ```
 
-## 重要说明
-
-当前版本默认不启用模拟数据。云端接口失败、密钥为空、签名错误、DNS 不通、Nginx 代理错误或上游超时，前端会直接弹窗提示并重试，不会再用本地假数据填充页面。
+前端已移除“缓存当前区间”“强制重建缓存”“云端刷新”和缓存进度面板，避免部署后的巡检页面误操作。

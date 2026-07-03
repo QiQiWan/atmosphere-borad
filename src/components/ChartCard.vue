@@ -10,14 +10,14 @@ const props = defineProps({
   series: { type: Array, required: true },
   type: { type: String, default: 'line' },
   yMax: { type: Number, default: null },
+  timeRangeText: { type: String, default: '' },
+  timeRange: { type: Array, default: () => [] },
 });
 
 const chartRef = ref(null);
 let chart = null;
 let resizeObserver = null;
 let retryTimer = null;
-
-const hasData = computed(() => Array.isArray(props.records) && props.records.length > 0);
 
 function chartWidth() {
   return chartRef.value?.clientWidth || window.innerWidth || 1024;
@@ -32,7 +32,13 @@ function isVeryNarrowChart() {
 }
 
 function toTimestamp(value) {
-  const parsed = dayjs(value);
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (value instanceof Date) return value.getTime();
+  const text = String(value).trim();
+  if (/^\d{13}$/.test(text)) return Number(text);
+  if (/^\d{10}$/.test(text)) return Number(text) * 1000;
+  const parsed = dayjs(text);
   return parsed.isValid() ? parsed.valueOf() : null;
 }
 
@@ -50,6 +56,90 @@ function formatNumber(value) {
   return num.toFixed(2).replace(/\.00$/, '').replace(/0$/, '');
 }
 
+const rangeBounds = computed(() => {
+  if (!Array.isArray(props.timeRange) || props.timeRange.length !== 2) return { start: null, end: null };
+  const start = toTimestamp(props.timeRange[0]);
+  const end = toTimestamp(props.timeRange[1]);
+  if (start === null || end === null) return { start: null, end: null };
+  return start <= end ? { start, end } : { start: end, end: start };
+});
+
+const chartRecords = computed(() => {
+  const rows = Array.isArray(props.records) ? props.records : [];
+  const { start, end } = rangeBounds.value;
+  if (start === null || end === null) return rows;
+  return rows.filter((record) => {
+    const ts = toTimestamp(record.create_time || record.time || record.timestamp);
+    return ts !== null && ts >= start && ts <= end;
+  });
+});
+
+function floorToHour(timestamp) {
+  return Math.floor(timestamp / (60 * 60 * 1000)) * 60 * 60 * 1000;
+}
+
+const hourlyRecords = computed(() => {
+  const buckets = new Map();
+  const keys = props.series.map((item) => item.key);
+  chartRecords.value.forEach((record) => {
+    const timestamp = toTimestamp(record.create_time || record.time || record.timestamp);
+    if (timestamp === null) return;
+    const hour = floorToHour(timestamp);
+    if (!buckets.has(hour)) {
+      buckets.set(hour, {
+        timestamp: hour,
+        create_time: dayjs(hour).format('YYYY-MM-DD HH:00:00'),
+        __count: 0,
+        __sum: {},
+        __countByKey: {},
+      });
+    }
+    const bucket = buckets.get(hour);
+    bucket.__count += 1;
+    keys.forEach((key) => {
+      const value = Number(record[key]);
+      if (!Number.isFinite(value)) return;
+      bucket.__sum[key] = (bucket.__sum[key] || 0) + value;
+      bucket.__countByKey[key] = (bucket.__countByKey[key] || 0) + 1;
+    });
+  });
+
+  return Array.from(buckets.values())
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map((bucket) => {
+      const row = {
+        timestamp: bucket.timestamp,
+        create_time: bucket.create_time,
+        sample_count: bucket.__count,
+      };
+      keys.forEach((key) => {
+        const count = bucket.__countByKey[key] || 0;
+        row[key] = count > 0 ? Number((bucket.__sum[key] / count).toFixed(4)) : null;
+      });
+      return row;
+    });
+});
+
+const hasData = computed(() => hourlyRecords.value.length > 0);
+
+function getDataSpanMs() {
+  const { start, end } = rangeBounds.value;
+  if (start !== null && end !== null && end > start) return end - start;
+  const times = hourlyRecords.value
+    .map((record) => toTimestamp(record.create_time || record.time || record.timestamp))
+    .filter((value) => value !== null);
+  if (times.length < 2) return 0;
+  return Math.max(...times) - Math.min(...times);
+}
+
+function formatXAxisLabel(value) {
+  const span = getDataSpanMs();
+  if (span >= 60 * 24 * 60 * 60 * 1000) return dayjs(value).format('YYYY-MM');
+  if (span >= 3 * 24 * 60 * 60 * 1000) return dayjs(value).format('MM-DD');
+  if (span >= 24 * 60 * 60 * 1000) return dayjs(value).format('MM-DD HH:mm');
+  return dayjs(value).format('HH:mm');
+}
+
 function buildSeries(item) {
   const chartType = item.type || props.type;
   return {
@@ -64,12 +154,13 @@ function buildSeries(item) {
     barMaxWidth: isMobileChart() ? 10 : 14,
     areaStyle: item.area ? { opacity: isMobileChart() ? 0.1 : 0.13 } : undefined,
     emphasis: { focus: 'series' },
-    data: props.records
+    data: hourlyRecords.value
       .map((record, index) => {
-        const timestamp = toTimestamp(record.create_time || record.time) ?? index;
-        return [timestamp, toNumber(record[item.key])];
+        const timestamp = toTimestamp(record.create_time || record.time || record.timestamp) ?? index;
+        const value = record[item.key];
+        return value === null || value === undefined ? null : [timestamp, toNumber(value)];
       })
-      .filter((pair) => pair[0] !== null),
+      .filter((pair) => Array.isArray(pair) && pair[0] !== null),
   };
 }
 
@@ -116,6 +207,9 @@ function buildOption() {
   const mobile = isMobileChart();
   const veryNarrow = isVeryNarrowChart();
   const hasRightAxis = props.series.some((item) => item.axis === 'right');
+  const span = getDataSpanMs();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const { start, end } = rangeBounds.value;
   return {
     backgroundColor: 'transparent',
     animationDuration: 350,
@@ -156,15 +250,17 @@ function buildOption() {
     xAxis: {
       type: 'time',
       boundaryGap: false,
-      minInterval: 5 * 60 * 1000,
-      maxInterval: 60 * 60 * 1000,
+      min: start ?? undefined,
+      max: end ?? undefined,
+      minInterval: span >= 3 * dayMs ? dayMs : 5 * 60 * 1000,
+      maxInterval: span >= 3 * dayMs ? 3 * dayMs : 60 * 60 * 1000,
       axisLabel: {
         color: '#a9bbd8',
         fontSize: mobile ? 10 : 12,
         hideOverlap: true,
         margin: mobile ? 7 : 10,
         formatter(value) {
-          return dayjs(value).format(mobile ? 'HH:mm' : 'HH:mm');
+          return formatXAxisLabel(value);
         },
       },
       axisLine: { lineStyle: { color: '#294569' } },
@@ -197,9 +293,12 @@ function resizeChart() {
 }
 
 watch(
-  () => [props.records, props.series, props.yMax],
+  () => [props.records, props.series, props.yMax, props.timeRangeText, props.timeRange],
   async () => {
     await nextTick();
+    if (!hasData.value && chart) {
+      chart.clear();
+    }
     renderChart();
   },
   { deep: true },
@@ -231,11 +330,10 @@ onBeforeUnmount(() => {
     <div class="chart-header">
       <div>
         <h3>{{ title }}</h3>
-        <p>{{ subtitle }}</p>
       </div>
-      <span class="chart-count">{{ records.length }} 条</span>
+      <span class="chart-count">{{ hourlyRecords.length }} 小时 / {{ chartRecords.length }} 条</span>
     </div>
     <div v-if="hasData" ref="chartRef" class="chart-canvas"></div>
-    <el-empty v-else description="暂无数据" :image-size="80" />
+    <el-empty v-else description="当前筛选时间区间内暂无数据" :image-size="80" />
   </section>
 </template>

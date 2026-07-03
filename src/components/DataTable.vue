@@ -10,7 +10,6 @@ defineProps({
     <div class="panel-title">
       <div>
         <h3>原始监测记录</h3>
-        <p>保留上游字段名，便于现场排查和接口联调。</p>
       </div>
       <span>{{ records.length }} 条</span>
     </div>
