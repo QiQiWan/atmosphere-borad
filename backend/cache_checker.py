@@ -70,6 +70,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-records", type=int, default=None, help="Minimum records required after cache check. Default comes from WEATHER_PRESTART_CACHE_MIN_RECORDS.")
     parser.add_argument("--strict", action="store_true", help="Exit with failure when the minimum record count is not met.")
     parser.add_argument("--no-scan", action="store_true", help="Do not print the day-by-day SQLite cache scan after warmup.")
+    parser.add_argument("--no-audit", action="store_true", help="Do not force-refresh missing/zero/recent cache days after warmup.")
     return parser
 
 
@@ -122,6 +123,8 @@ def main() -> int:
         prefetch_time_range,
         prefetch_time_range_chunked,
         print_cache_scan_report,
+        audit_and_refresh_cache_range,
+        print_cache_audit_report,
     )
 
     parser = _build_parser()
@@ -187,6 +190,20 @@ def main() -> int:
     print(f"[cache-checker] completed; source={source}; records={record_count}; elapsed={elapsed:.1f}s", flush=True)
     if message:
         print(f"[cache-checker] message: {message}", flush=True)
+
+    audit_enabled = _env_bool("WEATHER_STARTUP_CACHE_AUDIT_ENABLED", True)
+    if audit_enabled and not args.no_audit:
+        print("[cache-checker] running startup cache audit and repair...", flush=True)
+        try:
+            audit_result = audit_and_refresh_cache_range(start_time, end_time, source="prestart-cache-checker")
+            print_cache_audit_report(audit_result)
+            record_count = int(audit_result.get("record_count") or record_count)
+            if audit_result.get("errors"):
+                print(f"[cache-checker] WARNING: startup cache audit reported {len(audit_result.get('errors') or [])} day-level errors.", file=sys.stderr, flush=True)
+        except Exception as exc:
+            print(f"[cache-checker] ERROR: startup cache audit failed: {exc}", file=sys.stderr, flush=True)
+            if strict:
+                return 5
 
     scan_enabled = _env_bool("WEATHER_PRESTART_CACHE_SCAN_ENABLED", True)
     if scan_enabled and not args.no_scan:

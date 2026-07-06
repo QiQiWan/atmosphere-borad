@@ -75,12 +75,12 @@ import json, urllib.request, sys
 try:
     with urllib.request.urlopen("http://127.0.0.1:${BACKEND_PORT}/api/borad/health", timeout=2) as r:
         data = json.loads(r.read().decode("utf-8"))
-    sys.exit(0 if data.get("version") == "1.7.8" else 1)
+    sys.exit(0 if data.get("version") == "1.7.9" else 1)
 except Exception:
     sys.exit(1)
 PY
   then
-    echo "Backend v1.7.8 is ready."
+    echo "Backend v1.7.9 is ready."
     break
   fi
   sleep 1

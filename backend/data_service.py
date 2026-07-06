@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import requests
 
-APP_VERSION = "1.7.8"
+APP_VERSION = "1.7.9"
 
 
 class UpstreamError(RuntimeError):
@@ -74,7 +74,7 @@ class WeatherApiConfig:
     )
     appid: str = field(default_factory=lambda: _env_value("WEATHER_APP_ID", "WEATHER_APPID", "APPID", default="dashboard"))
     secret_key: str = field(default_factory=lambda: _env_value("WEATHER_SECRET_KEY", "WEATHER_SECRET", "SECRET_KEY"))
-    timeout_seconds: float = field(default_factory=lambda: _env_float("WEATHER_TIMEOUT_SECONDS", 60.0))
+    timeout_seconds: float = field(default_factory=lambda: max(60.0, _env_float("WEATHER_TIMEOUT_SECONDS", 60.0)))
     allow_mock: bool = field(default_factory=lambda: _env_bool("WEATHER_ALLOW_MOCK", False))
     force_mock: bool = field(default_factory=lambda: _env_bool("WEATHER_FORCE_MOCK", False))
     hmac_mode: str = field(default_factory=lambda: _env_value("WEATHER_HMAC_MODE", default="json"))
@@ -107,6 +107,13 @@ class WeatherApiConfig:
     live_refresh_days: int = field(default_factory=lambda: max(1, _env_int("WEATHER_LIVE_REFRESH_DAYS", 1)))
     live_refresh_force_current_days: bool = field(default_factory=lambda: _env_bool("WEATHER_LIVE_REFRESH_FORCE_CURRENT_DAYS", True))
     live_refresh_run_on_startup: bool = field(default_factory=lambda: _env_bool("WEATHER_LIVE_REFRESH_RUN_ON_STARTUP", True))
+    startup_cache_audit_enabled: bool = field(default_factory=lambda: _env_bool("WEATHER_STARTUP_CACHE_AUDIT_ENABLED", True))
+    startup_cache_audit_refresh_zero_days: bool = field(default_factory=lambda: _env_bool("WEATHER_STARTUP_CACHE_AUDIT_REFRESH_ZERO_DAYS", True))
+    startup_cache_audit_refresh_missing_days: bool = field(default_factory=lambda: _env_bool("WEATHER_STARTUP_CACHE_AUDIT_REFRESH_MISSING_DAYS", True))
+    startup_cache_audit_force_recent_days: int = field(default_factory=lambda: max(0, _env_int("WEATHER_STARTUP_CACHE_AUDIT_FORCE_RECENT_DAYS", 7)))
+    background_cache_audit_enabled: bool = field(default_factory=lambda: _env_bool("WEATHER_BACKGROUND_CACHE_AUDIT_ENABLED", True))
+    background_cache_audit_interval_seconds: int = field(default_factory=lambda: max(600, _env_int("WEATHER_BACKGROUND_CACHE_AUDIT_INTERVAL_SECONDS", 3600)))
+    background_cache_audit_days: int = field(default_factory=lambda: max(1, _env_int("WEATHER_BACKGROUND_CACHE_AUDIT_DAYS", 7)))
 
 
 def get_runtime_config_snapshot() -> Dict[str, Any]:
@@ -146,7 +153,15 @@ def get_runtime_config_snapshot() -> Dict[str, Any]:
         "live_refresh_days": config.live_refresh_days,
         "live_refresh_force_current_days": config.live_refresh_force_current_days,
         "live_refresh_run_on_startup": config.live_refresh_run_on_startup,
+        "startup_cache_audit_enabled": config.startup_cache_audit_enabled,
+        "startup_cache_audit_refresh_zero_days": config.startup_cache_audit_refresh_zero_days,
+        "startup_cache_audit_refresh_missing_days": config.startup_cache_audit_refresh_missing_days,
+        "startup_cache_audit_force_recent_days": config.startup_cache_audit_force_recent_days,
+        "background_cache_audit_enabled": config.background_cache_audit_enabled,
+        "background_cache_audit_interval_seconds": config.background_cache_audit_interval_seconds,
+        "background_cache_audit_days": config.background_cache_audit_days,
         "live_refresh": get_live_refresh_state() if '_LIVE_REFRESH_STATE' in globals() else {},
+        "cache_audit": get_cache_audit_state() if '_CACHE_AUDIT_STATE' in globals() else {},
         "env_hint": "Loaded from root .env/.env.local and backend .env/.env.local if present.",
     }
 
@@ -325,6 +340,42 @@ _LIVE_REFRESH_STATE: Dict[str, Any] = {
     "end_time": "",
     "message": "实时刷新尚未启动",
 }
+
+
+_CACHE_AUDIT_LOCK = threading.RLock()
+_CACHE_AUDIT_THREAD: threading.Thread | None = None
+_CACHE_AUDIT_STARTED = False
+_CACHE_AUDIT_STATE: Dict[str, Any] = {
+    "enabled": False,
+    "running": False,
+    "last_start_ms": 0,
+    "last_finish_ms": 0,
+    "last_elapsed_ms": 0,
+    "last_error": "",
+    "next_run_ms": 0,
+    "start_time": "",
+    "end_time": "",
+    "days_scanned": 0,
+    "days_refreshed": 0,
+    "records_after": 0,
+    "message": "缓存巡检尚未启动",
+}
+
+
+def _set_cache_audit_state(**kwargs: Any) -> Dict[str, Any]:
+    with _CACHE_AUDIT_LOCK:
+        _CACHE_AUDIT_STATE.update(kwargs)
+        return dict(_CACHE_AUDIT_STATE)
+
+
+def get_cache_audit_state() -> Dict[str, Any]:
+    with _CACHE_AUDIT_LOCK:
+        state = dict(_CACHE_AUDIT_STATE)
+    for key in ("last_start_ms", "last_finish_ms", "next_run_ms"):
+        value = state.get(key)
+        if value:
+            state[f"{key[:-3]}_text"] = datetime.fromtimestamp(int(value) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    return state
 
 
 def get_live_refresh_state() -> Dict[str, Any]:
@@ -1898,6 +1949,269 @@ def prefetch_time_range(start_time: str, end_time: str, force_refresh: bool = Fa
         "elapsed_ms": int(time.time() * 1000) - started_ms,
         "fetch": payload.get("fetch", {}),
     }
+
+
+
+def _day_date_value(day_item: Dict[str, Any]) -> datetime:
+    try:
+        return datetime.strptime(str(day_item.get("date") or ""), "%Y-%m-%d")
+    except ValueError:
+        return datetime(1970, 1, 1)
+
+
+def _audit_recent_cutoff(config: WeatherApiConfig) -> datetime:
+    days = max(0, int(config.startup_cache_audit_force_recent_days or 0))
+    if days <= 0:
+        return datetime.max
+    return (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1))
+
+
+def audit_and_refresh_cache_range(
+    start_time: str,
+    end_time: str,
+    source: str = "startup-audit",
+    progress_callback: Callable[[Dict[str, Any]], None] | None = None,
+) -> Dict[str, Any]:
+    """Scan SQLite cache day by day and repair stale or empty coverage.
+
+    The upstream notebook test proved that a date can return valid paged data
+    even when an older cache row says that date has zero records.  This audit is
+    deliberately stronger than a normal cache hit: it force-refreshes days that
+    are missing, days previously cached as zero, and a configurable recent
+    window.  It is designed for service startup and for periodic background
+    maintenance.
+    """
+
+    config = WeatherApiConfig()
+    started_ms = int(time.time() * 1000)
+    initial = scan_cached_data_by_day(start_time, end_time)
+    if initial.get("error"):
+        return {
+            "ok": False,
+            "source": source,
+            "message": "cache audit failed before refresh",
+            "error": initial.get("error"),
+            "start_time": start_time,
+            "end_time": end_time,
+            "initial_scan": initial,
+            "elapsed_ms": int(time.time() * 1000) - started_ms,
+        }
+
+    cutoff = _audit_recent_cutoff(config)
+    refresh_items: List[Dict[str, Any]] = []
+    for item in initial.get("days", []):
+        status = item.get("status")
+        date_value = _day_date_value(item)
+        recent = date_value >= cutoff
+        needs_refresh = False
+        reasons: List[str] = []
+        if status == "not_covered" and config.startup_cache_audit_refresh_missing_days:
+            needs_refresh = True
+            reasons.append("missing_coverage")
+        if status == "covered_no_records" and config.startup_cache_audit_refresh_zero_days:
+            needs_refresh = True
+            reasons.append("zero_record_coverage")
+        if recent and config.startup_cache_audit_force_recent_days > 0:
+            needs_refresh = True
+            reasons.append(f"recent_{config.startup_cache_audit_force_recent_days}d")
+        if needs_refresh:
+            cloned = dict(item)
+            cloned["refresh_reasons"] = reasons
+            refresh_items.append(cloned)
+
+    if progress_callback:
+        progress_callback({
+            "phase": "audit_plan",
+            "days_scanned": len(initial.get("days", [])),
+            "days_to_refresh": len(refresh_items),
+            "source": source,
+        })
+
+    refreshed: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+    for idx, item in enumerate(refresh_items, start=1):
+        day_start = str(item.get("start_time") or f"{item.get('date')} 00:00:00")
+        day_end = str(item.get("end_time") or f"{item.get('date')} 23:59:59")
+        reasons = item.get("refresh_reasons") or []
+        if progress_callback:
+            progress_callback({
+                "phase": "audit_refresh_start",
+                "index": idx,
+                "total": len(refresh_items),
+                "date": item.get("date"),
+                "start_time": day_start,
+                "end_time": day_end,
+                "reasons": reasons,
+                "source": source,
+            })
+        try:
+            result = prefetch_time_range_chunked(
+                day_start,
+                day_end,
+                force_refresh=True,
+                progress_callback=None,
+            ) if config.prefetch_split_days else prefetch_time_range(
+                day_start,
+                day_end,
+                force_refresh=True,
+                progress_callback=None,
+            )
+            refreshed.append({
+                "date": item.get("date"),
+                "start_time": day_start,
+                "end_time": day_end,
+                "record_count": int(result.get("record_count") or 0),
+                "reasons": reasons,
+                "source": result.get("source"),
+                "message": result.get("message"),
+            })
+            if progress_callback:
+                progress_callback({
+                    "phase": "audit_refresh_done",
+                    "index": idx,
+                    "total": len(refresh_items),
+                    "date": item.get("date"),
+                    "record_count": int(result.get("record_count") or 0),
+                    "source": source,
+                })
+        except Exception as exc:  # pragma: no cover - operational diagnostics
+            errors.append({
+                "date": item.get("date"),
+                "start_time": day_start,
+                "end_time": day_end,
+                "error": str(exc),
+                "reasons": reasons,
+            })
+            if progress_callback:
+                progress_callback({
+                    "phase": "audit_refresh_error",
+                    "index": idx,
+                    "total": len(refresh_items),
+                    "date": item.get("date"),
+                    "error": str(exc),
+                    "source": source,
+                })
+
+    final = scan_cached_data_by_day(start_time, end_time)
+    elapsed_ms = int(time.time() * 1000) - started_ms
+    return {
+        "ok": not errors,
+        "source": source,
+        "message": "cache audit completed" if not errors else "cache audit completed with errors",
+        "start_time": start_time,
+        "end_time": end_time,
+        "days_scanned": len(initial.get("days", [])),
+        "days_to_refresh": len(refresh_items),
+        "days_refreshed": len(refreshed),
+        "errors": errors,
+        "refreshed": refreshed,
+        "initial_scan": initial,
+        "final_scan": final,
+        "record_count": int(final.get("total_records") or 0),
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+def print_cache_audit_report(result: Dict[str, Any], prefix: str = "[cache-audit]") -> None:
+    print(
+        f"{prefix} completed; ok={result.get('ok')}; days_scanned={result.get('days_scanned')}; "
+        f"days_to_refresh={result.get('days_to_refresh')}; days_refreshed={result.get('days_refreshed')}; "
+        f"records_after={result.get('record_count')}; elapsed={int(result.get('elapsed_ms') or 0) / 1000:.1f}s",
+        flush=True,
+    )
+    for item in result.get("refreshed", [])[:200]:
+        print(
+            f"{prefix} refreshed {item.get('date')}: records={item.get('record_count')}; "
+            f"reasons={','.join(item.get('reasons') or [])}",
+            flush=True,
+        )
+    for item in result.get("errors", [])[:50]:
+        print(f"{prefix} ERROR {item.get('date')}: {item.get('error')}", flush=True)
+
+
+
+def _cache_audit_once(reason: str = "periodic") -> Dict[str, Any]:
+    config = WeatherApiConfig()
+    start_time, end_time = get_recent_prefetch_range(config.background_cache_audit_days)
+    started_ms = int(time.time() * 1000)
+    _set_cache_audit_state(
+        enabled=config.background_cache_audit_enabled,
+        running=True,
+        last_start_ms=started_ms,
+        start_time=start_time,
+        end_time=end_time,
+        last_error="",
+        message=f"正在巡检最近 {config.background_cache_audit_days} 天缓存：{reason}",
+    )
+    try:
+        result = audit_and_refresh_cache_range(start_time, end_time, source=f"background-{reason}")
+        finished_ms = int(time.time() * 1000)
+        _set_cache_audit_state(
+            running=False,
+            last_finish_ms=finished_ms,
+            last_elapsed_ms=finished_ms - started_ms,
+            last_error="" if result.get("ok") else json.dumps(result.get("errors") or [], ensure_ascii=False)[:500],
+            next_run_ms=finished_ms + config.background_cache_audit_interval_seconds * 1000,
+            days_scanned=int(result.get("days_scanned") or 0),
+            days_refreshed=int(result.get("days_refreshed") or 0),
+            records_after=int(result.get("record_count") or 0),
+            message="后台缓存巡检完成" if result.get("ok") else "后台缓存巡检完成但存在错误",
+        )
+        print(
+            f"[background-cache-audit] done; reason={reason}; range={start_time} -> {end_time}; "
+            f"refreshed={result.get('days_refreshed')}; records_after={result.get('record_count')}; "
+            f"elapsed={(finished_ms - started_ms) / 1000:.1f}s",
+            flush=True,
+        )
+        return result
+    except Exception as exc:  # pragma: no cover - defensive service guard
+        finished_ms = int(time.time() * 1000)
+        _set_cache_audit_state(
+            running=False,
+            last_finish_ms=finished_ms,
+            last_elapsed_ms=finished_ms - started_ms,
+            last_error=str(exc),
+            next_run_ms=finished_ms + config.background_cache_audit_interval_seconds * 1000,
+            message="后台缓存巡检失败",
+        )
+        print(f"[background-cache-audit] failed; reason={reason}; error={exc}", flush=True)
+        return {"ok": False, "error": str(exc), "source": f"background-{reason}"}
+
+
+def _background_cache_audit_loop() -> None:
+    config = WeatherApiConfig()
+    if not config.background_cache_audit_enabled:
+        _set_cache_audit_state(enabled=False, message="后台缓存巡检已关闭")
+        return
+    _set_cache_audit_state(enabled=True, message="后台缓存巡检线程已启动")
+    # Run once shortly after the web service starts. The pre-start checker already
+    # does the blocking audit; this second pass repairs cases where operators
+    # start the backend directly without the launcher script.
+    _cache_audit_once(reason="startup")
+    while True:
+        config = WeatherApiConfig()
+        if not config.background_cache_audit_enabled:
+            _set_cache_audit_state(enabled=False, running=False, message="后台缓存巡检已关闭")
+            return
+        wait_seconds = max(600, int(config.background_cache_audit_interval_seconds))
+        _set_cache_audit_state(next_run_ms=int(time.time() * 1000) + wait_seconds * 1000)
+        time.sleep(wait_seconds)
+        _cache_audit_once(reason="periodic")
+
+
+def start_background_cache_audit_loop_once() -> Dict[str, Any]:
+    global _CACHE_AUDIT_THREAD, _CACHE_AUDIT_STARTED
+    config = WeatherApiConfig()
+    if not config.background_cache_audit_enabled:
+        _set_cache_audit_state(enabled=False, message="后台缓存巡检已关闭")
+        return get_cache_audit_state()
+    with _CACHE_AUDIT_LOCK:
+        if _CACHE_AUDIT_STARTED and _CACHE_AUDIT_THREAD and _CACHE_AUDIT_THREAD.is_alive():
+            return get_cache_audit_state()
+        _CACHE_AUDIT_STARTED = True
+        _CACHE_AUDIT_THREAD = threading.Thread(target=_background_cache_audit_loop, name="weather-background-cache-audit", daemon=True)
+        _CACHE_AUDIT_THREAD.start()
+    return get_cache_audit_state()
 
 
 def prefetch_recent_month(force_refresh: bool | None = None) -> Dict[str, Any]:

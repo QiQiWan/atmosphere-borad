@@ -1,4 +1,26 @@
-# v1.7.8
+# v1.7.9
+
+1. 启动前缓存检查器增加“缓存巡检与修复”阶段：先扫描 SQLite 中已有的逐日覆盖结果，再强制刷新缺失覆盖天、已覆盖但 0 记录天，以及最近若干天，避免旧缓存把实际有数据的日期错误标记为 `covered_no_records`。
+2. 后端请求第三方接口的超时时间设置为最低 60 秒；即使 `.env` 中遗留 `WEATHER_TIMEOUT_SECONDS=10`，运行时也会提升到 60 秒。
+3. 新增运行期后台缓存巡检线程：服务运行后定期扫描最近若干天并修复缓存，配合实时刷新线程，避免页面长期停留在部署时刻的数据。
+4. `/api/borad/cache/progress` 增加 `cache_audit` 状态；新增 `/api/borad/cache/audit` 手动触发巡检接口。
+5. 版本号更新为 `1.7.9`。
+
+建议 `.env` 增加：
+
+```env
+WEATHER_TIMEOUT_SECONDS=60
+WEATHER_UPSTREAM_USE_SYSTEM_PROXY=false
+WEATHER_STARTUP_CACHE_AUDIT_ENABLED=true
+WEATHER_STARTUP_CACHE_AUDIT_REFRESH_ZERO_DAYS=true
+WEATHER_STARTUP_CACHE_AUDIT_REFRESH_MISSING_DAYS=true
+WEATHER_STARTUP_CACHE_AUDIT_FORCE_RECENT_DAYS=7
+WEATHER_BACKGROUND_CACHE_AUDIT_ENABLED=true
+WEATHER_BACKGROUND_CACHE_AUDIT_INTERVAL_SECONDS=3600
+WEATHER_BACKGROUND_CACHE_AUDIT_DAYS=7
+```
+
+# v1.7.9
 
 ## 关键修复
 
@@ -20,7 +42,7 @@
    - 启动前缓存检查时，最近实时窗口不再直接复用旧缓存，而会重新请求第三方接口更新缓存。
 
 4. 健康检查和配置快照增强。
-   - `/api/borad/health` 返回版本 `1.7.8`。
+   - `/api/borad/health` 返回版本 `1.7.9`。
    - 配置快照中增加上游代理、实时刷新状态、刷新间隔等字段。
    - 缓存检查器控制台打印 timeout 和 proxy_env，便于排查请求是否仍走代理。
 

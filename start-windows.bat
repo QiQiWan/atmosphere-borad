@@ -51,11 +51,11 @@ start "atmosphere-backend" cmd /k "cd /d %~dp0backend && ..\.venv\Scripts\python
 
 echo Waiting for backend http://127.0.0.1:%BACKEND_PORT%/api/borad/health ...
 for /l %%i in (1,1,30) do (
-  powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:%BACKEND_PORT%/api/borad/health' -TimeoutSec 2; $j = $r.Content | ConvertFrom-Json; if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500 -and $j.version -eq '1.7.8') { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>nul
+  powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:%BACKEND_PORT%/api/borad/health' -TimeoutSec 2; $j = $r.Content | ConvertFrom-Json; if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500 -and $j.version -eq '1.7.9') { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>nul
   if !ERRORLEVEL!==0 goto backend_ready
   timeout /t 1 /nobreak >nul
 )
-echo Backend v1.7.8 health check did not respond in 30 seconds. Frontend will still start; check backend window for errors.
+echo Backend v1.7.9 health check did not respond in 30 seconds. Frontend will still start; check backend window for errors.
 :backend_ready
 
 if not exist node_modules (

@@ -11,7 +11,7 @@ from flask import Flask, jsonify, request
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BACKEND_DIR = Path(__file__).resolve().parent
-APP_VERSION = "1.7.8"
+APP_VERSION = "1.7.9"
 
 
 def _strip_env_value(value: str) -> str:
@@ -69,6 +69,9 @@ from data_service import (  # noqa: E402
     delete_cache_record,
     start_live_refresh_loop_once,
     get_live_refresh_state,
+    start_background_cache_audit_loop_once,
+    get_cache_audit_state,
+    audit_and_refresh_cache_range,
 )
 
 
@@ -176,6 +179,7 @@ def create_app() -> Flask:
             "message": "ok",
             "prefetch": get_prefetch_progress(),
             "live_refresh": get_live_refresh_state(),
+            "cache_audit": get_cache_audit_state(),
             "cache": get_cache_status(),
             "config": get_runtime_config_snapshot(),
         })
@@ -193,6 +197,31 @@ def create_app() -> Flask:
             "cache": get_cache_status(),
             "config": get_runtime_config_snapshot(),
         })
+
+    @app.route("/api/borad/cache/audit", methods=["GET", "POST"])
+    @app.route("/api/borad/cache/audit/", methods=["GET", "POST"])
+    @app.route("/api/board/cache/audit", methods=["GET", "POST"])
+    @app.route("/api/cache/audit", methods=["GET", "POST"])
+    def cache_audit():
+        start_time = request.args.get("start_time") or request.args.get("startTime")
+        end_time = request.args.get("end_time") or request.args.get("endTime")
+        days_raw = request.args.get("days")
+        try:
+            if not (start_time and end_time):
+                from data_service import get_recent_prefetch_range
+                days = int(days_raw) if days_raw not in (None, "") else None
+                start_time, end_time = get_recent_prefetch_range(days)
+            result = audit_and_refresh_cache_range(start_time, end_time, source="manual-api")
+            return jsonify({
+                "code": 0 if result.get("ok") else 207,
+                "message": result.get("message", "cache audit completed"),
+                "audit": result,
+                "cache_audit": get_cache_audit_state(),
+                "cache": get_cache_status(),
+                "config": get_runtime_config_snapshot(),
+            }), 200 if result.get("ok") else 207
+        except Exception as exc:
+            return jsonify({"code": 500, "message": str(exc), "config": get_runtime_config_snapshot()}), 500
 
 
     @app.route("/api/borad/cache/scan", methods=["GET"])
@@ -295,6 +324,7 @@ def create_app() -> Flask:
         return _handle_weather(page, page_size)
 
     start_live_refresh_loop_once()
+    start_background_cache_audit_loop_once()
     start_startup_prefetch_once()
     return app
 
