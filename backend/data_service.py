@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import requests
 
-APP_VERSION = "1.7.9"
+APP_VERSION = "1.8.0"
 
 
 class UpstreamError(RuntimeError):

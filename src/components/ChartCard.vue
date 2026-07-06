@@ -5,19 +5,23 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const props = defineProps({
   title: { type: String, required: true },
-  subtitle: { type: String, default: '' },
   records: { type: Array, default: () => [] },
+  rawCount: { type: Number, default: 0 },
   series: { type: Array, required: true },
   type: { type: String, default: 'line' },
   yMax: { type: Number, default: null },
-  timeRangeText: { type: String, default: '' },
   timeRange: { type: Array, default: () => [] },
+  loading: { type: Boolean, default: false },
+  renderDelay: { type: Number, default: 0 },
 });
 
 const chartRef = ref(null);
+const rendering = ref(false);
 let chart = null;
 let resizeObserver = null;
 let retryTimer = null;
+let renderTimer = null;
+let rafId = null;
 
 function chartWidth() {
   return chartRef.value?.clientWidth || window.innerWidth || 1024;
@@ -44,7 +48,7 @@ function toTimestamp(value) {
 
 function toNumber(value) {
   const num = Number(value);
-  return Number.isFinite(num) ? num : 0;
+  return Number.isFinite(num) ? num : null;
 }
 
 function formatNumber(value) {
@@ -64,70 +68,13 @@ const rangeBounds = computed(() => {
   return start <= end ? { start, end } : { start: end, end: start };
 });
 
-const chartRecords = computed(() => {
-  const rows = Array.isArray(props.records) ? props.records : [];
-  const { start, end } = rangeBounds.value;
-  if (start === null || end === null) return rows;
-  return rows.filter((record) => {
-    const ts = toTimestamp(record.create_time || record.time || record.timestamp);
-    return ts !== null && ts >= start && ts <= end;
-  });
-});
-
-function floorToHour(timestamp) {
-  return Math.floor(timestamp / (60 * 60 * 1000)) * 60 * 60 * 1000;
-}
-
-const hourlyRecords = computed(() => {
-  const buckets = new Map();
-  const keys = props.series.map((item) => item.key);
-  chartRecords.value.forEach((record) => {
-    const timestamp = toTimestamp(record.create_time || record.time || record.timestamp);
-    if (timestamp === null) return;
-    const hour = floorToHour(timestamp);
-    if (!buckets.has(hour)) {
-      buckets.set(hour, {
-        timestamp: hour,
-        create_time: dayjs(hour).format('YYYY-MM-DD HH:00:00'),
-        __count: 0,
-        __sum: {},
-        __countByKey: {},
-      });
-    }
-    const bucket = buckets.get(hour);
-    bucket.__count += 1;
-    keys.forEach((key) => {
-      const value = Number(record[key]);
-      if (!Number.isFinite(value)) return;
-      bucket.__sum[key] = (bucket.__sum[key] || 0) + value;
-      bucket.__countByKey[key] = (bucket.__countByKey[key] || 0) + 1;
-    });
-  });
-
-  return Array.from(buckets.values())
-    .sort((a, b) => a.timestamp - b.timestamp)
-    .map((bucket) => {
-      const row = {
-        timestamp: bucket.timestamp,
-        create_time: bucket.create_time,
-        sample_count: bucket.__count,
-      };
-      keys.forEach((key) => {
-        const count = bucket.__countByKey[key] || 0;
-        row[key] = count > 0 ? Number((bucket.__sum[key] / count).toFixed(4)) : null;
-      });
-      return row;
-    });
-});
-
-const hasData = computed(() => hourlyRecords.value.length > 0);
+const chartRecords = computed(() => (Array.isArray(props.records) ? props.records : []));
+const hasData = computed(() => chartRecords.value.length > 0);
 
 function getDataSpanMs() {
   const { start, end } = rangeBounds.value;
   if (start !== null && end !== null && end > start) return end - start;
-  const times = hourlyRecords.value
-    .map((record) => toTimestamp(record.create_time || record.time || record.timestamp))
-    .filter((value) => value !== null);
+  const times = chartRecords.value.map((record) => toTimestamp(record.timestamp || record.create_time)).filter((value) => value !== null);
   if (times.length < 2) return 0;
   return Math.max(...times) - Math.min(...times);
 }
@@ -150,17 +97,19 @@ function buildSeries(item) {
     step: item.step,
     showSymbol: false,
     symbolSize: isMobileChart() ? 4 : 5,
-    lineStyle: { width: isMobileChart() ? 2 : 2.4 },
+    lineStyle: { width: isMobileChart() ? 2 : 2.2 },
     barMaxWidth: isMobileChart() ? 10 : 14,
     areaStyle: item.area ? { opacity: isMobileChart() ? 0.1 : 0.13 } : undefined,
     emphasis: { focus: 'series' },
-    data: hourlyRecords.value
+    progressive: 200,
+    progressiveThreshold: 600,
+    data: chartRecords.value
       .map((record, index) => {
-        const timestamp = toTimestamp(record.create_time || record.time || record.timestamp) ?? index;
-        const value = record[item.key];
-        return value === null || value === undefined ? null : [timestamp, toNumber(value)];
+        const timestamp = toTimestamp(record.timestamp || record.create_time) ?? index;
+        const value = toNumber(record[item.key]);
+        return value === null ? null : [timestamp, value];
       })
-      .filter((pair) => Array.isArray(pair) && pair[0] !== null),
+      .filter(Boolean),
   };
 }
 
@@ -212,7 +161,7 @@ function buildOption() {
   const { start, end } = rangeBounds.value;
   return {
     backgroundColor: 'transparent',
-    animationDuration: 350,
+    animation: false,
     color: ['#60a5fa', '#a3e635', '#f59e0b', '#22d3ee', '#f472b6'],
     tooltip: {
       trigger: 'axis',
@@ -233,20 +182,8 @@ function buildOption() {
       textStyle: { color: '#dbeafe', fontSize: mobile ? 11 : 12 },
     },
     grid: mobile
-      ? {
-          left: veryNarrow ? 2 : 4,
-          right: hasRightAxis ? (veryNarrow ? 2 : 4) : 2,
-          top: 42,
-          bottom: 28,
-          containLabel: true,
-        }
-      : {
-          left: 12,
-          right: hasRightAxis ? 14 : 8,
-          top: 48,
-          bottom: 36,
-          containLabel: true,
-        },
+      ? { left: veryNarrow ? 2 : 4, right: hasRightAxis ? (veryNarrow ? 2 : 4) : 2, top: 42, bottom: 28, containLabel: true }
+      : { left: 12, right: hasRightAxis ? 14 : 8, top: 48, bottom: 36, containLabel: true },
     xAxis: {
       type: 'time',
       boundaryGap: false,
@@ -272,8 +209,21 @@ function buildOption() {
   };
 }
 
+function cancelScheduledRender() {
+  clearTimeout(retryTimer);
+  clearTimeout(renderTimer);
+  if (rafId) cancelAnimationFrame(rafId);
+  retryTimer = null;
+  renderTimer = null;
+  rafId = null;
+}
+
 function renderChart() {
-  if (!chartRef.value || !hasData.value) return;
+  if (props.loading) return;
+  if (!chartRef.value || !hasData.value) {
+    rendering.value = false;
+    return;
+  }
   const width = chartRef.value.clientWidth;
   const height = chartRef.value.clientHeight;
   if (width < 80 || height < 80) {
@@ -282,31 +232,43 @@ function renderChart() {
     return;
   }
   if (!chart) chart = echarts.init(chartRef.value, null, { renderer: 'canvas' });
-  chart.setOption(buildOption(), true);
+  chart.setOption(buildOption(), true, true);
   chart.resize();
+  rendering.value = false;
+}
+
+function scheduleRender() {
+  cancelScheduledRender();
+  if (props.loading) return;
+  if (!hasData.value) {
+    chart?.clear();
+    rendering.value = false;
+    return;
+  }
+  rendering.value = true;
+  renderTimer = setTimeout(() => {
+    rafId = requestAnimationFrame(renderChart);
+  }, Math.max(0, props.renderDelay));
 }
 
 function resizeChart() {
-  if (!chart) return;
+  if (!chart || props.loading) return;
   chart.resize();
-  chart.setOption(buildOption(), true);
+  chart.setOption(buildOption(), true, true);
 }
 
 watch(
-  () => [props.records, props.series, props.yMax, props.timeRangeText, props.timeRange],
+  () => [props.records, props.series, props.yMax, props.timeRange, props.loading],
   async () => {
     await nextTick();
-    if (!hasData.value && chart) {
-      chart.clear();
-    }
-    renderChart();
+    scheduleRender();
   },
-  { deep: true },
+  { deep: false },
 );
 
 onMounted(async () => {
   await nextTick();
-  renderChart();
+  scheduleRender();
   if (chartRef.value) {
     resizeObserver = new ResizeObserver(resizeChart);
     resizeObserver.observe(chartRef.value);
@@ -316,7 +278,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
-  clearTimeout(retryTimer);
+  cancelScheduledRender();
   window.removeEventListener('resize', resizeChart);
   window.removeEventListener('orientationchange', resizeChart);
   resizeObserver?.disconnect();
@@ -326,14 +288,17 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="chart-card">
+  <section class="chart-card" v-loading="loading || rendering">
     <div class="chart-header">
       <div>
         <h3>{{ title }}</h3>
       </div>
-      <span class="chart-count">{{ hourlyRecords.length }} 小时 / {{ chartRecords.length }} 条</span>
+      <span class="chart-count">{{ chartRecords.length }} 小时 / {{ rawCount }} 条</span>
     </div>
     <div v-if="hasData" ref="chartRef" class="chart-canvas"></div>
+    <div v-else-if="loading" class="chart-skeleton">
+      <span>图表数据准备中</span>
+    </div>
     <el-empty v-else description="当前筛选时间区间内暂无数据" :image-size="80" />
   </section>
 </template>

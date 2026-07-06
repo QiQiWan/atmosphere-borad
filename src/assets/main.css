@@ -974,3 +974,99 @@ body::-webkit-scrollbar-track {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
+
+/* v1.8.0 performance loading and incremental rendering */
+.load-progress-panel {
+  margin: 14px 0;
+  padding: 12px 16px;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  border-radius: 16px;
+  background: rgba(7, 17, 31, 0.74);
+  box-shadow: 0 14px 40px rgba(2, 6, 23, 0.18);
+}
+
+.load-progress-text {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: #b9c9e6;
+  font-size: 13px;
+}
+
+.load-progress-panel .el-progress-bar__outer {
+  background-color: rgba(30, 41, 59, 0.92);
+}
+
+.load-progress-panel .el-progress-bar__inner {
+  background: linear-gradient(90deg, #2563eb, #38bdf8);
+}
+
+.table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 12px;
+  color: #91a7c7;
+  font-size: 12px;
+}
+
+.table-footer .el-pagination {
+  --el-pagination-bg-color: rgba(15, 31, 53, 0.8);
+  --el-pagination-button-bg-color: rgba(15, 31, 53, 0.8);
+  --el-pagination-hover-color: #60a5fa;
+  --el-text-color-primary: #dbeafe;
+  --el-text-color-regular: #a9bbd8;
+  --el-disabled-bg-color: rgba(15, 31, 53, 0.38);
+}
+
+.chart-skeleton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 330px;
+  border-radius: 14px;
+  background: linear-gradient(90deg, rgba(15, 31, 53, 0.72), rgba(30, 64, 115, 0.28), rgba(15, 31, 53, 0.72));
+  color: #9fb4d8;
+  font-size: 13px;
+}
+
+.chart-card .el-loading-mask,
+.metric-grid .el-loading-mask,
+.monitor-table .el-loading-mask {
+  background-color: rgba(7, 17, 31, 0.72) !important;
+  backdrop-filter: blur(2px);
+}
+
+.chart-card .el-loading-spinner .path,
+.metric-grid .el-loading-spinner .path,
+.monitor-table .el-loading-spinner .path {
+  stroke: #60a5fa;
+}
+
+@media (max-width: 720px) {
+  .load-progress-text,
+  .table-footer {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .table-footer .el-pagination {
+    width: 100%;
+    overflow-x: auto;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 560px) {
+  .chart-skeleton {
+    height: 265px;
+  }
+}
+
+@media (max-width: 420px) {
+  .chart-skeleton {
+    height: 255px;
+  }
+}

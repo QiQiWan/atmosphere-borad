@@ -1,8 +1,30 @@
 <script setup>
-defineProps({
+import { computed, ref, watch } from 'vue';
+
+const props = defineProps({
   records: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
 });
+
+const currentPage = ref(1);
+const pageSize = ref(100);
+
+const total = computed(() => (Array.isArray(props.records) ? props.records.length : 0));
+const pagedRecords = computed(() => {
+  const rows = Array.isArray(props.records) ? props.records : [];
+  const start = (currentPage.value - 1) * pageSize.value;
+  return rows.slice(start, start + pageSize.value);
+});
+const pageStart = computed(() => (total.value === 0 ? 0 : (currentPage.value - 1) * pageSize.value + 1));
+const pageEnd = computed(() => Math.min(currentPage.value * pageSize.value, total.value));
+
+watch(
+  () => props.records,
+  () => {
+    currentPage.value = 1;
+  },
+  { deep: false },
+);
 </script>
 
 <template>
@@ -11,16 +33,17 @@ defineProps({
       <div>
         <h3>原始监测记录</h3>
       </div>
-      <span>{{ records.length }} 条</span>
+      <span>{{ total }} 条</span>
     </div>
     <el-table
       v-loading="loading"
-      :data="records"
+      :data="pagedRecords"
       height="420"
       border
       stripe
       class="monitor-table"
       empty-text="暂无数据"
+      table-layout="fixed"
     >
       <el-table-column prop="create_time" label="采集时间" min-width="165" fixed />
       <el-table-column prop="wendu" label="温度" width="86" />
@@ -42,5 +65,17 @@ defineProps({
       <el-table-column prop="shuimo" label="水膜" width="78" />
       <el-table-column prop="jixue" label="积雪" width="78" />
     </el-table>
+    <div class="table-footer" v-if="total > 0">
+      <span>当前渲染 {{ pageStart }}–{{ pageEnd }} 条，避免一次性渲染全部记录造成卡顿。</span>
+      <el-pagination
+        v-model:current-page="currentPage"
+        v-model:page-size="pageSize"
+        :page-sizes="[50, 100, 200, 500]"
+        :total="total"
+        layout="sizes, prev, pager, next"
+        small
+        background
+      />
+    </div>
   </section>
 </template>

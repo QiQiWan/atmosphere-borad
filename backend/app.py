@@ -11,7 +11,7 @@ from flask import Flask, jsonify, request
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BACKEND_DIR = Path(__file__).resolve().parent
-APP_VERSION = "1.7.9"
+APP_VERSION = "1.8.0"
 
 
 def _strip_env_value(value: str) -> str:
