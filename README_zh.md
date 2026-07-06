@@ -1,8 +1,32 @@
 # 荆襄气象监测看板优化版
 
-当前版本：v1.7.7。
+当前版本：v1.7.8。
 
-## v1.7.7 缓存管理页面
+## v1.7.8 数据拉取与实时更新修复
+
+本版修复的核心问题是：独立 notebook 可以按页成功拉取 2026-07-03 全天 1408 条数据，但系统后端拉取失败。原因通常是后端 `requests` 自动读取系统代理环境变量，导致请求走到本地代理 `127.0.0.1:7897`，而不是直接访问 `weather-api.jsjldzkj.com`。v1.7.8 后端默认禁用系统代理。
+
+推荐 `.env`：
+
+```env
+WEATHER_TIMEOUT_SECONDS=60
+WEATHER_UPSTREAM_USE_SYSTEM_PROXY=false
+WEATHER_UPSTREAM_TIME_FORMAT=auto
+WEATHER_HMAC_MODE=json
+
+WEATHER_LIVE_REFRESH_ENABLED=true
+WEATHER_LIVE_REFRESH_INTERVAL_SECONDS=600
+WEATHER_LIVE_REFRESH_DAYS=1
+WEATHER_LIVE_REFRESH_FORCE_CURRENT_DAYS=true
+WEATHER_LIVE_REFRESH_RUN_ON_STARTUP=true
+```
+
+如服务器必须通过代理访问第三方接口，再把 `WEATHER_UPSTREAM_USE_SYSTEM_PROXY` 改成 `true`。
+
+为了避免服务运行几天后仍显示部署时刻的数据，系统现在会在后端启动后开启实时刷新线程，默认每 10 分钟强制刷新最近 1 天数据并写入 SQLite。页面打开时优先读取 SQLite，因此只要后端持续运行，页面会读取后台持续更新后的缓存数据。
+
+
+## v1.7.8 缓存管理页面
 
 缓存控制已从主看板拆分到独立页面，主看板不会显示缓存重建、云端刷新、缓存进度等控制项。需要管理服务器 SQLite 缓存时，直接访问：
 
@@ -179,11 +203,11 @@ rm -f runtime_cache/weather_cache.sqlite3
 WEATHER_CACHE_TABLE=weather_cache_v174
 ```
 
-## v1.7.7 本地调试注意事项
+## v1.7.8 本地调试注意事项
 
 如果页面控制台出现 `/api/borad/cache/progress 404`，同时 `/api/borad/1/5000` 返回 `Upstream request timed out after 10.0s`，通常说明 52000 端口上仍然运行着旧版 Flask 后端。此时前端虽然是新版本，但 Vite 代理命中了旧后端，因此会出现“缓存已经完成但页面仍然去请求第三方接口”的现象。
 
-v1.7.7 的启动脚本会自动清理 `BACKEND_PORT` 上的旧监听进程，再启动新后端，并通过 `/api/borad/health` 校验 `version=1.7.7`。如不希望脚本自动结束旧进程，可设置：
+v1.7.8 的启动脚本会自动清理 `BACKEND_PORT` 上的旧监听进程，再启动新后端，并通过 `/api/borad/health` 校验 `version=1.7.8`。如不希望脚本自动结束旧进程，可设置：
 
 ```bash
 SKIP_KILL_BACKEND_PORT=true
@@ -198,10 +222,10 @@ http://127.0.0.1:52000/api/borad/health
 返回中应包含：
 
 ```json
-"version": "1.7.7"
+"version": "1.7.8"
 ```
 
-## v1.7.7 启动前缓存扫描
+## v1.7.8 启动前缓存扫描
 
 系统启动前会先运行 `backend/cache_checker.py`。缓存完成后，检查器会继续扫描服务器 SQLite 数据库，并在后端控制台打印逐日结果：日期、覆盖状态、记录数、首末记录时间和活跃小时。该信息只打印到控制台，不在前端显示，用于判断图表中的空白日期是缓存缺失还是第三方接口当天确实没有数据。
 

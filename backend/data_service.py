@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Tuple
 
 import requests
 
-APP_VERSION = "1.7.7"
+APP_VERSION = "1.7.8"
 
 
 class UpstreamError(RuntimeError):
@@ -74,7 +74,7 @@ class WeatherApiConfig:
     )
     appid: str = field(default_factory=lambda: _env_value("WEATHER_APP_ID", "WEATHER_APPID", "APPID", default="dashboard"))
     secret_key: str = field(default_factory=lambda: _env_value("WEATHER_SECRET_KEY", "WEATHER_SECRET", "SECRET_KEY"))
-    timeout_seconds: float = field(default_factory=lambda: _env_float("WEATHER_TIMEOUT_SECONDS", 30.0))
+    timeout_seconds: float = field(default_factory=lambda: _env_float("WEATHER_TIMEOUT_SECONDS", 60.0))
     allow_mock: bool = field(default_factory=lambda: _env_bool("WEATHER_ALLOW_MOCK", False))
     force_mock: bool = field(default_factory=lambda: _env_bool("WEATHER_FORCE_MOCK", False))
     hmac_mode: str = field(default_factory=lambda: _env_value("WEATHER_HMAC_MODE", default="json"))
@@ -101,6 +101,12 @@ class WeatherApiConfig:
     startup_prefetch_days: int = field(default_factory=lambda: max(1, _env_int("WEATHER_STARTUP_PREFETCH_DAYS", 30)))
     startup_prefetch_force: bool = field(default_factory=lambda: _env_bool("WEATHER_STARTUP_PREFETCH_FORCE", False))
     query_async_prefetch_on_miss: bool = field(default_factory=lambda: _env_bool("WEATHER_QUERY_ASYNC_PREFETCH_ON_MISS", True))
+    upstream_use_system_proxy: bool = field(default_factory=lambda: _env_bool("WEATHER_UPSTREAM_USE_SYSTEM_PROXY", False))
+    live_refresh_enabled: bool = field(default_factory=lambda: _env_bool("WEATHER_LIVE_REFRESH_ENABLED", True))
+    live_refresh_interval_seconds: int = field(default_factory=lambda: max(60, _env_int("WEATHER_LIVE_REFRESH_INTERVAL_SECONDS", 600)))
+    live_refresh_days: int = field(default_factory=lambda: max(1, _env_int("WEATHER_LIVE_REFRESH_DAYS", 1)))
+    live_refresh_force_current_days: bool = field(default_factory=lambda: _env_bool("WEATHER_LIVE_REFRESH_FORCE_CURRENT_DAYS", True))
+    live_refresh_run_on_startup: bool = field(default_factory=lambda: _env_bool("WEATHER_LIVE_REFRESH_RUN_ON_STARTUP", True))
 
 
 def get_runtime_config_snapshot() -> Dict[str, Any]:
@@ -134,6 +140,13 @@ def get_runtime_config_snapshot() -> Dict[str, Any]:
         "query_async_prefetch_on_miss": config.query_async_prefetch_on_miss,
         "async_cache_on_miss": True,
         "prefetch_progress_enabled": True,
+        "upstream_use_system_proxy": config.upstream_use_system_proxy,
+        "live_refresh_enabled": config.live_refresh_enabled,
+        "live_refresh_interval_seconds": config.live_refresh_interval_seconds,
+        "live_refresh_days": config.live_refresh_days,
+        "live_refresh_force_current_days": config.live_refresh_force_current_days,
+        "live_refresh_run_on_startup": config.live_refresh_run_on_startup,
+        "live_refresh": get_live_refresh_state() if '_LIVE_REFRESH_STATE' in globals() else {},
         "env_hint": "Loaded from root .env/.env.local and backend .env/.env.local if present.",
     }
 
@@ -294,6 +307,172 @@ _PREFETCH_STATE: Dict[str, Any] = {
     "finished_at_ms": 0,
     "elapsed_ms": 0,
 }
+
+
+_LIVE_REFRESH_LOCK = threading.RLock()
+_LIVE_REFRESH_THREAD: threading.Thread | None = None
+_LIVE_REFRESH_STARTED = False
+_LIVE_REFRESH_STATE: Dict[str, Any] = {
+    "enabled": False,
+    "running": False,
+    "last_start_ms": 0,
+    "last_finish_ms": 0,
+    "last_elapsed_ms": 0,
+    "last_record_count": 0,
+    "last_error": "",
+    "next_run_ms": 0,
+    "start_time": "",
+    "end_time": "",
+    "message": "实时刷新尚未启动",
+}
+
+
+def get_live_refresh_state() -> Dict[str, Any]:
+    with _LIVE_REFRESH_LOCK:
+        state = dict(_LIVE_REFRESH_STATE)
+    for key in ("last_start_ms", "last_finish_ms", "next_run_ms"):
+        value = state.get(key)
+        if value:
+            state[f"{key[:-3]}_text"] = datetime.fromtimestamp(int(value) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    return state
+
+
+def _set_live_refresh_state(**kwargs: Any) -> Dict[str, Any]:
+    with _LIVE_REFRESH_LOCK:
+        _LIVE_REFRESH_STATE.update(kwargs)
+        return dict(_LIVE_REFRESH_STATE)
+
+
+def _format_dt(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_live_refresh_range(config: WeatherApiConfig | None = None) -> Tuple[str, str]:
+    config = config or WeatherApiConfig()
+    now = datetime.now().replace(microsecond=0)
+    start_dt = (now - timedelta(days=max(1, config.live_refresh_days) - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return _format_dt(start_dt), _format_dt(now)
+
+
+def _range_touches_live_window(start_time: str, end_time: str, config: WeatherApiConfig | None = None) -> bool:
+    config = config or WeatherApiConfig()
+    if not config.live_refresh_enabled:
+        return False
+    now = datetime.now().replace(microsecond=0)
+    live_start = (now - timedelta(days=max(1, config.live_refresh_days) - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    req_start = _parse_time(start_time, live_start)
+    req_end = _parse_time(end_time, now)
+    return req_end >= live_start and req_start <= now
+
+
+def _live_refresh_once(reason: str = "periodic") -> Dict[str, Any]:
+    config = WeatherApiConfig()
+    start_time, end_time = get_live_refresh_range(config)
+    started_ms = int(time.time() * 1000)
+    _set_live_refresh_state(
+        enabled=config.live_refresh_enabled,
+        running=True,
+        last_start_ms=started_ms,
+        start_time=start_time,
+        end_time=end_time,
+        last_error="",
+        message=f"正在刷新最近 {config.live_refresh_days} 天实时数据：{reason}",
+    )
+    try:
+        result = prefetch_time_range_chunked(
+            start_time,
+            end_time,
+            force_refresh=True,
+            progress_callback=None,
+        ) if config.prefetch_split_days else prefetch_time_range(
+            start_time,
+            end_time,
+            force_refresh=True,
+            progress_callback=None,
+        )
+        finished_ms = int(time.time() * 1000)
+        _set_live_refresh_state(
+            running=False,
+            last_finish_ms=finished_ms,
+            last_elapsed_ms=finished_ms - started_ms,
+            last_record_count=int(result.get("record_count") or 0),
+            last_error="",
+            next_run_ms=finished_ms + config.live_refresh_interval_seconds * 1000,
+            message="实时数据刷新完成",
+        )
+        print(
+            f"[live-refresh] done; reason={reason}; range={start_time} -> {end_time}; "
+            f"records={int(result.get('record_count') or 0)}; elapsed={(finished_ms - started_ms) / 1000:.1f}s",
+            flush=True,
+        )
+        return {"ok": True, "result": result}
+    except Exception as exc:  # pragma: no cover - defensive service guard
+        finished_ms = int(time.time() * 1000)
+        _set_live_refresh_state(
+            running=False,
+            last_finish_ms=finished_ms,
+            last_elapsed_ms=finished_ms - started_ms,
+            last_error=str(exc),
+            next_run_ms=finished_ms + config.live_refresh_interval_seconds * 1000,
+            message="实时数据刷新失败",
+        )
+        print(f"[live-refresh] failed; reason={reason}; error={exc}", flush=True)
+        return {"ok": False, "error": str(exc)}
+
+
+def _live_refresh_loop() -> None:
+    config = WeatherApiConfig()
+    if not config.live_refresh_enabled:
+        _set_live_refresh_state(enabled=False, message="实时刷新已关闭")
+        return
+    _set_live_refresh_state(enabled=True, message="实时刷新线程已启动")
+    if config.live_refresh_run_on_startup:
+        _live_refresh_once(reason="startup")
+    while True:
+        config = WeatherApiConfig()
+        if not config.live_refresh_enabled:
+            _set_live_refresh_state(enabled=False, running=False, message="实时刷新已关闭")
+            return
+        wait_seconds = max(60, int(config.live_refresh_interval_seconds))
+        _set_live_refresh_state(next_run_ms=int(time.time() * 1000) + wait_seconds * 1000)
+        time.sleep(wait_seconds)
+        _live_refresh_once(reason="periodic")
+
+
+def start_live_refresh_loop_once() -> Dict[str, Any]:
+    global _LIVE_REFRESH_THREAD, _LIVE_REFRESH_STARTED
+    config = WeatherApiConfig()
+    if not config.live_refresh_enabled:
+        _set_live_refresh_state(enabled=False, message="实时刷新已关闭")
+        return get_live_refresh_state()
+    with _LIVE_REFRESH_LOCK:
+        if _LIVE_REFRESH_STARTED and _LIVE_REFRESH_THREAD and _LIVE_REFRESH_THREAD.is_alive():
+            return get_live_refresh_state()
+        _LIVE_REFRESH_STARTED = True
+        _LIVE_REFRESH_THREAD = threading.Thread(target=_live_refresh_loop, name="weather-live-refresh", daemon=True)
+        _LIVE_REFRESH_THREAD.start()
+    return get_live_refresh_state()
+
+
+def maybe_refresh_live_window_for_query(start_time: str, end_time: str) -> Dict[str, Any]:
+    config = WeatherApiConfig()
+    if not _range_touches_live_window(start_time, end_time, config):
+        return get_live_refresh_state()
+    state = get_live_refresh_state()
+    now_ms = int(time.time() * 1000)
+    last_finish_ms = int(state.get("last_finish_ms") or 0)
+    running = bool(state.get("running"))
+    if running:
+        return state
+    if not last_finish_ms or now_ms - last_finish_ms > config.live_refresh_interval_seconds * 1000:
+        start_live_refresh_loop_once()
+        # If the periodic thread has not produced a first run yet, start a one-shot
+        # background refresh without blocking the user request.
+        current = get_live_refresh_state()
+        if not current.get("running") and not current.get("last_finish_ms"):
+            thread = threading.Thread(target=_live_refresh_once, args=("query-open",), name="weather-live-refresh-query", daemon=True)
+            thread.start()
+    return get_live_refresh_state()
 
 
 def _copy_prefetch_state() -> Dict[str, Any]:
@@ -970,6 +1149,21 @@ def _upstream_time_modes(config: WeatherApiConfig) -> List[str]:
     return [configured]
 
 
+def _make_upstream_session(config: WeatherApiConfig) -> requests.Session:
+    """Create a requests session for the third-party API.
+
+    requests reads HTTP_PROXY/HTTPS_PROXY/ALL_PROXY from the host environment by
+    default.  In local testing this often routes the weather API call to a local
+    proxy such as 127.0.0.1:7897 and causes false timeouts.  The production
+    default is therefore direct connection.  Set WEATHER_UPSTREAM_USE_SYSTEM_PROXY=true
+    only when the server must use a configured proxy.
+    """
+
+    session = requests.Session()
+    session.trust_env = bool(config.upstream_use_system_proxy)
+    return session
+
+
 def _fetch_upstream_page(start_time: str, end_time: str, page: int, page_size: int, config: WeatherApiConfig) -> Dict[str, Any]:
     if config.force_mock:
         raise UpstreamError("WEATHER_FORCE_MOCK is enabled.")
@@ -982,7 +1176,8 @@ def _fetch_upstream_page(start_time: str, end_time: str, page: int, page_size: i
     for mode in _upstream_time_modes(config):
         params = _build_upstream_params(start_time, end_time, mode)
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=config.timeout_seconds)
+            session = _make_upstream_session(config)
+            response = session.get(url, headers=headers, params=params, timeout=config.timeout_seconds)
             response.raise_for_status()
         except requests.Timeout as exc:
             last_error = exc
@@ -1568,7 +1763,7 @@ def prefetch_time_range_chunked(start_time: str, end_time: str, force_refresh: b
 
     config = WeatherApiConfig()
     started_ms = int(time.time() * 1000)
-    if not force_refresh:
+    if not force_refresh and not (config.live_refresh_force_current_days and _range_touches_live_window(start_time, end_time, config)):
         cached = load_cached_payload(start_time, end_time, 1, config.upstream_page_size, config)
         if cached is not None:
             return {
@@ -1599,14 +1794,15 @@ def prefetch_time_range_chunked(start_time: str, end_time: str, force_refresh: b
                 "filtered_records": len(_filter_records_to_range(all_records, start_time, end_time)),
             })
         try:
-            cached_chunk = None if force_refresh else load_cached_payload(chunk_start, chunk_end, 1, config.upstream_page_size, config)
+            chunk_force_refresh = force_refresh or (config.live_refresh_force_current_days and _range_touches_live_window(chunk_start, chunk_end, config))
+            cached_chunk = None if chunk_force_refresh else load_cached_payload(chunk_start, chunk_end, 1, config.upstream_page_size, config)
             if cached_chunk is not None:
                 payload = cached_chunk
                 chunk_source = "database-cache"
             else:
                 payload = fetch_upstream_data(chunk_start, chunk_end, 1, config.upstream_page_size, config, progress_callback=progress_callback)
                 save_cached_payload(chunk_start, chunk_end, 1, config.upstream_page_size, config, payload)
-                chunk_source = "upstream"
+                chunk_source = "upstream-live-refresh" if chunk_force_refresh else "upstream"
             records = payload.get("result", {}).get("list") or []
             all_records.extend(records)
             fetch = payload.get("fetch") or {}
@@ -1668,7 +1864,7 @@ def prefetch_time_range(start_time: str, end_time: str, force_refresh: bool = Fa
 
     config = WeatherApiConfig()
     started_ms = int(time.time() * 1000)
-    if not force_refresh:
+    if not force_refresh and not (config.live_refresh_force_current_days and _range_touches_live_window(start_time, end_time, config)):
         cached = load_cached_payload(start_time, end_time, 1, config.upstream_page_size, config)
         if cached is not None:
             return {
@@ -1806,11 +2002,13 @@ def start_recent_month_prefetch(force_refresh: bool | None = None, source: str =
 
 def get_weather_data(start_time: str, end_time: str, page: int, page_size: int, force_refresh: bool = False) -> Tuple[Dict[str, Any], int]:
     config = WeatherApiConfig()
+    live_state = maybe_refresh_live_window_for_query(start_time, end_time)
 
     if not force_refresh:
         cached = load_cached_payload(start_time, end_time, page, page_size, config)
         if cached is not None:
             cached["prefetch"] = get_prefetch_progress()
+            cached["live_refresh"] = live_state
             return cached, 200
 
         # Important v1.7.5 fix:
@@ -1826,6 +2024,7 @@ def get_weather_data(start_time: str, end_time: str, page: int, page_size: int, 
             partial["cache"]["partial"] = False
             partial["cache"]["validated_range_start"] = True
             partial["prefetch"] = get_prefetch_progress()
+            partial["live_refresh"] = live_state
             return partial, 200
 
     # Cache miss: never block the page by doing a synchronous long-range fetch.
@@ -1848,6 +2047,7 @@ def get_weather_data(start_time: str, end_time: str, page: int, page_size: int, 
         partial["prefetch"] = prefetch
     else:
         partial["prefetch"] = get_prefetch_progress()
+    partial["live_refresh"] = get_live_refresh_state()
     return partial, 202
 
 

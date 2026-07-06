@@ -165,6 +165,8 @@ def main() -> int:
     print(f"[cache-checker]   db         = {snapshot.get('cache_db_path')}", flush=True)
     print(f"[cache-checker]   page_size  = {snapshot.get('upstream_page_size')}", flush=True)
     print(f"[cache-checker]   max_pages  = {snapshot.get('upstream_max_pages')}", flush=True)
+    print(f"[cache-checker]   timeout    = {snapshot.get('timeout_seconds')}s", flush=True)
+    print(f"[cache-checker]   proxy_env  = {snapshot.get('upstream_use_system_proxy')}", flush=True)
     print(f"[cache-checker]   split_days = {snapshot.get('prefetch_split_days')}", flush=True)
     print(f"[cache-checker]   chunk_days = {snapshot.get('prefetch_chunk_days')}", flush=True)
 

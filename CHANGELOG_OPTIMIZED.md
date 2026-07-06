@@ -1,60 +1,44 @@
-# v1.7.7
+# v1.7.8
 
-- 新增独立缓存管理页面 `/cache-admin`，主看板不提供跳转入口，避免现场展示时误操作。
-- 新增缓存扫描、逐日详情、逐小时记录分布、按日重新拉取、按日删除、单条记录删除等后端接口。
-- 主看板删除部署说明、图表说明、缓存控制类显示，只保留展示和基础刷新操作。
-- 缓存管理页可统一查看 `covered_with_records`、`covered_no_records`、`not_covered` 等状态，便于判断数据缺口来自接口无数据还是缓存未覆盖。
+## 关键修复
 
-# v1.7.7
+1. 修复第三方接口在系统后端中拉不到数据的问题。
+   - 后端请求第三方接口时默认禁用系统代理环境变量，避免 Windows/Clash 等环境把请求转到 127.0.0.1:7897 后超时。
+   - 新增 `WEATHER_UPSTREAM_USE_SYSTEM_PROXY=false`，确实需要系统代理时可改为 `true`。
+   - 默认上游请求超时调整为 60 秒，适配单日多页接口 10–25 秒/页的实际响应速度。
 
-- 启动前缓存检查完成后，新增服务器端 SQLite 数据库逐日扫描报告。控制台会打印每一天是否已覆盖、记录数、首末记录时间、活跃小时，便于判断图表缺口是数据库缺失还是该日期确实没有上游数据。
-- 新增 `WEATHER_PRESTART_CACHE_SCAN_ENABLED=true`，默认启用控制台扫描，不在前端展示。
-- 前端移除“缓存当前区间”“强制重建缓存”“云端刷新”和缓存进度面板，避免巡检端误操作。页面保留健康检查、刷新数据和时间筛选。
-- 后端版本更新为 `1.7.7`，启动脚本同步校验健康检查版本。
+2. 保持和独立 notebook 验证一致的第三方接口调用方式。
+   - URL 仍为 `/api/getDeviceData/{page}/{page_size}`。
+   - Header 仍为 `Authorization`、`timestamp`。
+   - Query 仍为 `search[start_time]`、`search[end_time]`。
+   - 默认 `WEATHER_UPSTREAM_TIME_FORMAT=auto`，优先毫秒时间戳。
 
-# v1.7.4
+3. 修复服务长时间运行后数据停留在部署时刻的问题。
+   - 新增后端实时增量刷新线程。
+   - 默认每 600 秒强制刷新最近 1 天数据并写入 SQLite。
+   - 查询时间范围触及最近实时窗口时，会启动/保持实时刷新线程。
+   - 启动前缓存检查时，最近实时窗口不再直接复用旧缓存，而会重新请求第三方接口更新缓存。
 
-- 新增启动前按自然日分块缓存策略：最近 30 天数据默认按 1 天一个窗口逐段请求第三方接口。
-- 缓存检查器默认使用严格模式：缓存记录数低于 `WEATHER_PRESTART_CACHE_MIN_RECORDS` 时直接阻止后端启动。
-- 默认缓存表名改为 `weather_cache_v174`，避免旧版本把宽时间区间错误缓存为空数据后继续命中。
-- 服务器数据库覆盖缓存读取逻辑优化：只要覆盖区间有效，就允许返回该区间内已有记录，不再要求第一条记录必须接近 00:00。
-- 新增 `WEATHER_PREFETCH_SPLIT_DAYS` 与 `WEATHER_PREFETCH_CHUNK_DAYS` 配置。
-- `backend/cache_checker.py` 增加 chunk 级别进度日志，能看到每天缓存开始、完成、记录数和停止原因。
-- 默认关闭 Flask 启动后的重复后台预缓存，避免启动前检查器已完成缓存后再次请求第三方接口。
+4. 健康检查和配置快照增强。
+   - `/api/borad/health` 返回版本 `1.7.8`。
+   - 配置快照中增加上游代理、实时刷新状态、刷新间隔等字段。
+   - 缓存检查器控制台打印 timeout 和 proxy_env，便于排查请求是否仍走代理。
 
-# v1.7.3
+## 新增配置
 
-- 启动前缓存检查器默认优先使用 13 位毫秒时间戳请求第三方接口，兼容原版前端传参方式。
-- 增加 `WEATHER_UPSTREAM_TIME_FORMAT=auto`，可依次尝试 `ms`、`text`、`raw`。
-- 本地开发场景中允许非严格缓存检查，避免 0 条数据时阻断后端启动。
+```env
+WEATHER_TIMEOUT_SECONDS=60
+WEATHER_UPSTREAM_USE_SYSTEM_PROXY=false
 
-# v1.7.2
+WEATHER_LIVE_REFRESH_ENABLED=true
+WEATHER_LIVE_REFRESH_INTERVAL_SECONDS=600
+WEATHER_LIVE_REFRESH_DAYS=1
+WEATHER_LIVE_REFRESH_FORCE_CURRENT_DAYS=true
+WEATHER_LIVE_REFRESH_RUN_ON_STARTUP=true
+```
 
-- 新增 `backend/cache_checker.py` 启动前数据库缓存检查器。
-- Linux/Windows 一键启动脚本在启动 Flask 前会先运行缓存检查器，确认最近必要时间段已经缓存到服务器 SQLite 数据库。
-- 缓存检查器会输出分页拉取进度、记录数、停止原因和耗时。
+## 验证
 
-# v1.7.1
-
-- 新增前端“服务器数据库缓存进度”面板。
-- 查询未完整命中缓存时，后端可启动后台缓存任务，前端轮询进度并自动刷新。
-
-# v1.7.0
-
-- 新增后端最近 30 天预缓存机制。
-- 修复上游 `result.total` 不可靠时过早停止分页的问题。
-- 默认不信任第三方接口返回的 `total`。
-
-# v1.6.x
-
-- SQLite 缓存升级为查询缓存、逐条记录缓存和覆盖区间缓存。
-- 图表按小时聚合均值显示。
-- 趋势图横轴绑定日期选择器起止时间。
-
-## v1.7.5
-
-- 修复本地调试时 52000 端口被旧后端进程占用导致前端命中新旧版本混用的问题。启动脚本现在会先清理监听 `BACKEND_PORT` 的旧进程，再运行缓存检查器并启动新后端。
-- 后端健康检查新增 `version=1.7.5`，启动脚本会等待并校验版本，避免 Vite 前端连接到旧 Flask 进程。
-- 数据查询接口优先从服务器 SQLite 记录表读取已有缓存，即使覆盖元数据不完全匹配，也不会直接回退到第三方接口超时。
-- 缓存未命中时，接口不再同步等待长时间远程分页，而是启动异步缓存任务并立即返回可解释状态。
-- 增加 `/api/borad/cache/progress/` 等尾斜杠兼容路由，降低代理和手动访问造成的 404 风险。
+- `python3 -m py_compile backend/data_service.py backend/app.py backend/cache_checker.py` 通过。
+- `node --check vite.config.js` 与 `node --check src/api/data.js` 通过。
+- 已确认后端上游请求 session 默认 `trust_env=False`。

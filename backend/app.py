@@ -11,7 +11,7 @@ from flask import Flask, jsonify, request
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 BACKEND_DIR = Path(__file__).resolve().parent
-APP_VERSION = "1.7.7"
+APP_VERSION = "1.7.8"
 
 
 def _strip_env_value(value: str) -> str:
@@ -67,6 +67,8 @@ from data_service import (  # noqa: E402
     get_cache_day_detail,
     delete_cache_day,
     delete_cache_record,
+    start_live_refresh_loop_once,
+    get_live_refresh_state,
 )
 
 
@@ -173,6 +175,21 @@ def create_app() -> Flask:
             "code": 0,
             "message": "ok",
             "prefetch": get_prefetch_progress(),
+            "live_refresh": get_live_refresh_state(),
+            "cache": get_cache_status(),
+            "config": get_runtime_config_snapshot(),
+        })
+
+    @app.route("/api/borad/cache/live-refresh", methods=["POST", "GET"])
+    @app.route("/api/borad/cache/live-refresh/", methods=["POST", "GET"])
+    @app.route("/api/board/cache/live-refresh", methods=["POST", "GET"])
+    @app.route("/api/cache/live-refresh", methods=["POST", "GET"])
+    def cache_live_refresh():
+        state = start_live_refresh_loop_once()
+        return jsonify({
+            "code": 0,
+            "message": "live refresh loop started",
+            "live_refresh": state,
             "cache": get_cache_status(),
             "config": get_runtime_config_snapshot(),
         })
@@ -277,6 +294,7 @@ def create_app() -> Flask:
             return "", 204
         return _handle_weather(page, page_size)
 
+    start_live_refresh_loop_once()
     start_startup_prefetch_once()
     return app
 
